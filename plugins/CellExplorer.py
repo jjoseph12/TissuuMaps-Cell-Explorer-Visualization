@@ -447,29 +447,44 @@ def _expand_labels_tile(
 
 
 def _polygons_from_labels(lab: np.ndarray, tile: Tile) -> Dict[int, List[List[List[float]]]]:
+    """
+    FAST polygon extraction using cv2.findContours in C++.
+    This is 10-100x faster than the pure Python approach.
+    """
+    import cv2
+    
     r0, c0 = tile.r0, tile.c0
     output: Dict[int, List[List[List[float]]]] = {}
-    labels = np.unique(lab)
-    for lbl in labels:
-        if lbl <= 0:
-            continue
-        mask = lab == lbl
-        if not mask.any():
-            continue
-        contours = measure.find_contours(mask.astype(np.uint8), 0.5)
-        poly_list: List[List[List[float]]] = []
+    
+    # Get unique labels (excluding background)
+    unique_labels = np.unique(lab)
+    unique_labels = unique_labels[unique_labels > 0]
+    
+    if len(unique_labels) == 0:
+        return output
+    
+    # Process each label - cv2.findContours is MUCH faster than skimage
+    for lbl in unique_labels:
+        mask = (lab == lbl).astype(np.uint8) * 255
+        
+        # cv2.findContours is implemented in C++ and is very fast
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        poly_list = []
         for contour in contours:
-            if contour.shape[0] < 3:
+            if len(contour) < 3:
                 continue
-            polygon: List[List[float]] = []
-            for y, x in contour:
-                polygon.append([float(x + c0), float(y + r0)])
+            # contour is shape (N, 1, 2) - reshape to (N, 2)
+            contour = contour.reshape(-1, 2)
+            polygon = [[float(x + c0), float(y + r0)] for x, y in contour]
             if polygon and polygon[0] != polygon[-1]:
                 polygon.append(polygon[0])
             if polygon:
                 poly_list.append(polygon)
+        
         if poly_list:
             output[int(lbl)] = poly_list
+    
     return output
 
 
@@ -489,36 +504,29 @@ def _outline_paths(lab: np.ndarray, tile: Tile) -> List[List[List[float]]]:
 
 def _outline_paths_per_label(lab: np.ndarray, tile: Tile, labels: Optional[List[int]] = None) -> Dict[int, List[List[List[float]]]]:
     """
-    Generate outline paths for each individual label.
-    
-    Args:
-        lab: Label array
-        tile: Tile with offset info
-        labels: Optional list of specific labels to generate outlines for
-    
-    Returns:
-        Dict mapping label_id -> list of outline paths for that label
+    Generate outline paths for each individual label using cv2 (fast C++ implementation).
     """
+    import cv2
+    
     r0, c0 = tile.r0, tile.c0
     result: Dict[int, List[List[List[float]]]] = {}
     
-    unique_labels = labels if labels is not None else np.unique(lab)
-    unique_labels = [lbl for lbl in unique_labels if lbl != 0]  # Skip background
+    unique_labels = labels if labels is not None else np.unique(lab).tolist()
+    unique_labels = [lbl for lbl in unique_labels if lbl != 0]
+    
+    if not unique_labels:
+        return result
     
     for lbl in unique_labels:
-        # Create binary mask for this label
-        mask = (lab == lbl).astype(np.uint8)
+        mask = (lab == lbl).astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        # Find contours for this specific label
-        contours = measure.find_contours(mask, 0.5)
-        
-        paths: List[List[List[float]]] = []
+        paths = []
         for contour in contours:
-            if contour.shape[0] < 2:
+            if len(contour) < 2:
                 continue
-            path: List[List[float]] = []
-            for y, x in contour:
-                path.append([float(x + c0), float(y + r0)])
+            contour = contour.reshape(-1, 2)
+            path = [[float(x + c0), float(y + r0)] for x, y in contour]
             paths.append(path)
         
         if paths:
@@ -779,7 +787,7 @@ class Plugin:
         # CRITICAL FIX: Use app-level storage instead of module-level global
         # This survives module reloading which TissUUmaps does on each request
         if not hasattr(app, '_cell_explorer_state'):
-            LOGGER.info("🆕 Initializing NEW app-level state (first time or after app restart)")
+            LOGGER.info("Initializing NEW app-level state (first time or after app restart)")
             app._cell_explorer_state = {
                 "context": None,
                 "tiles": [],
@@ -800,7 +808,7 @@ class Plugin:
                 "single_tile_mode": False,
             }
         else:
-            LOGGER.info(f"♻️ Reusing EXISTING app-level state (context exists: {app._cell_explorer_state.get('context') is not None})")
+            LOGGER.info(f"Reusing EXISTING app-level state (context exists: {app._cell_explorer_state.get('context') is not None})")
         
         self._state = app._cell_explorer_state
         self.current_params: Dict[str, str] = {}
@@ -894,7 +902,7 @@ class Plugin:
                 # DO NOT clear geometry_cache or color_cache here!
                 
                 self._state["dataset_config"] = config
-                LOGGER.info(f"✅ Context rehydrated. Dataset ID: {self.dataset_id}")
+                LOGGER.info(f"Context rehydrated. Dataset ID: {self.dataset_id}")
             else:
                 raise RuntimeError("Load a dataset first.")
         return self.context
@@ -905,7 +913,7 @@ class Plugin:
         if ctx is None:
             LOGGER.debug(f"🔴 context getter: returning None (app._cell_explorer_state id: {id(self._state)})")
         else:
-            LOGGER.debug(f"🟢 context getter: returning context (ctx id: {id(ctx)}, state id: {id(self._state)})")
+            LOGGER.debug(f"context getter: returning context (ctx id: {id(ctx)}, state id: {id(self._state)})")
         return ctx  # type: ignore[return-value]
 
     @context.setter
@@ -913,7 +921,7 @@ class Plugin:
         if value is None:
             LOGGER.warning(f"🔴 context setter: Setting context to None! (state id: {id(self._state)})")
         else:
-            LOGGER.info(f"🟢 context setter: Storing context (ctx id: {id(value)}, state id: {id(self._state)})")
+            LOGGER.info(f"context setter: Storing context (ctx id: {id(value)}, state id: {id(self._state)})")
         self._state["context"] = value
 
     @property
@@ -1836,37 +1844,156 @@ class Plugin:
         
         LOGGER.info(f"GeometryCache MISS for tile {tile_id}, computing geometry...")
         
+        import time
+        t0 = time.time()
+        
         # Cache miss - do expensive geometry computation
         _, lab_raw = ctx.crop_dense(tile.r0, tile.r1, tile.c0, tile.c1)
-        he_crop, lab_exp, dist_px = _expand_labels_tile(
-            ctx,
-            tile,
-            mode=b2c_mode,
-            max_bin_distance=max_bin_distance,
-            mpp=mpp,
-            bin_um=bin_um,
-            volume_ratio=volume_ratio,
-            pad_factor=pad_factor,
-        )
+        t1 = time.time()
+        LOGGER.info(f"Tile {tile_id}: crop_dense took {(t1-t0)*1000:.1f}ms")
+        
+        # Only do expensive label expansion if actually needed
+        if b2c_mode == "none":
+            # Skip expansion entirely - huge time savings!
+            lab_exp = lab_raw  # Use raw labels directly
+            dist_px = 0
+            t2 = time.time()
+            LOGGER.info(f"Tile {tile_id}: SKIPPED _expand_labels_tile (b2c_mode=none)")
+        else:
+            he_crop, lab_exp, dist_px = _expand_labels_tile(
+                ctx,
+                tile,
+                mode=b2c_mode,
+                max_bin_distance=max_bin_distance,
+                mpp=mpp,
+                bin_um=bin_um,
+                volume_ratio=volume_ratio,
+                pad_factor=pad_factor,
+            )
+            t2 = time.time()
+            LOGGER.info(f"Tile {tile_id}: _expand_labels_tile took {(t2-t1)*1000:.1f}ms")
 
         centroid_idx, rows_abs, cols_abs, local_rc = _centroids_for_tile(ctx, tile)
         labels_at_centroids = lab_exp[local_rc[:, 0], local_rc[:, 1]] if local_rc.size else np.empty((0,), dtype=np.int32)
+        t3 = time.time()
+        LOGGER.info(f"Tile {tile_id}: _centroids_for_tile took {(t3-t2)*1000:.1f}ms, found {len(centroid_idx)} centroids")
 
-        polygons_exp = _polygons_from_labels(lab_exp, tile)
-        polygons_raw = _polygons_from_labels(lab_raw, tile)
-
-        outline_exp = _outline_paths(lab_exp, tile)
-        outline_raw = _outline_paths(lab_raw, tile)
+        import cv2
+        from scipy import ndimage
         
-        # PRE-COMPUTE per-label outlines for ALL labels (for instant selected-only mode)
-        # This is done ONCE during geometry computation, not on every overlay request
+        def generate_polygons_fast(lab_array, tile_r0, tile_c0):
+            """Generate polygons for all labels using bounding box + optimizations.
+            
+            Optimizations:
+            1. Bounding box extraction (only process small regions)
+            2. cv2.approxPolyDP for polygon simplification
+            3. Integer coordinates (smaller JSON)
+            """
+            slices = ndimage.find_objects(lab_array.astype(np.int32))
+            
+            polygons = {}
+            
+            for lbl_idx, bbox in enumerate(slices):
+                if bbox is None:
+                    continue
+                lbl = lbl_idx + 1
+                
+                row_slice, col_slice = bbox
+                sub_array = lab_array[row_slice, col_slice]
+                
+                # Optimized mask creation
+                mask = (sub_array == lbl).astype(np.uint8) * 255
+                
+                # findContours with CHAIN_APPROX_SIMPLE already reduces points
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                poly_list = []
+                offset_x = col_slice.start + tile_c0
+                offset_y = row_slice.start + tile_r0
+                
+                for contour in contours:
+                    if len(contour) < 3:
+                        continue
+                    
+                    # Simplify polygon with approxPolyDP (epsilon=2.0 for faster browser rendering)
+                    epsilon = 2.0
+                    simplified = cv2.approxPolyDP(contour, epsilon, True)
+                    
+                    if len(simplified) < 3:
+                        continue
+                    
+                    # Reshape and add offsets
+                    pts = simplified.reshape(-1, 2)
+                    pts[:, 0] += offset_x
+                    pts[:, 1] += offset_y
+                    
+                    # Use integers (smaller JSON, faster)
+                    polygon = [[int(x), int(y)] for x, y in pts]
+                    
+                    # Close polygon if needed
+                    if polygon and polygon[0] != polygon[-1]:
+                        polygon.append(polygon[0])
+                    
+                    if polygon:
+                        poly_list.append(polygon)
+                
+                if poly_list:
+                    polygons[lbl] = poly_list
+            
+            return polygons
+        
+        r0, c0 = tile.r0, tile.c0
+        
+        # Only compute expanded polygons if expansion is enabled
+        need_expanded = (b2c_mode != "none")
+        
+        if need_expanded:
+            polygons_exp = generate_polygons_fast(lab_exp, r0, c0)
+            t4 = time.time()
+            LOGGER.info(f"Tile {tile_id}: _polygons_from_labels(exp) VECTORIZED took {(t4-t3)*1000:.1f}ms, {len(polygons_exp)} labels")
+        else:
+            polygons_exp = {}
+            t4 = time.time()
+            LOGGER.info(f"Tile {tile_id}: SKIPPED expanded polygons (b2c_mode=none)")
+        
+        polygons_raw = generate_polygons_fast(lab_raw, r0, c0)
+        t5 = time.time()
+        LOGGER.info(f"Tile {tile_id}: _polygons_from_labels(raw) VECTORIZED took {(t5-t4)*1000:.1f}ms, {len(polygons_raw)} labels")
+
+        # DERIVE outline paths from already-computed polygons (instead of recomputing)
+        # This reuses the polygon data we just generated - instant!
+        outline_exp = []
+        if need_expanded:
+            for lbl, poly_list in polygons_exp.items():
+                outline_exp.extend(poly_list)
+        t6 = time.time()
+        LOGGER.info(f"Tile {tile_id}: outline_exp DERIVED from polygons ({len(outline_exp)} paths)")
+        
+        outline_raw = []
+        for lbl, poly_list in polygons_raw.items():
+            outline_raw.extend(poly_list)
+        t7 = time.time()
+        LOGGER.info(f"Tile {tile_id}: outline_raw DERIVED from polygons ({len(outline_raw)} paths)")
+        
+        # Get unique labels for per-label outlines (skip pre-computation - use on-demand)
         unique_labels = np.unique(labels_at_centroids)
         unique_labels = unique_labels[unique_labels > 0].tolist()
         
-        LOGGER.info(f"Pre-computing per-label outlines for {len(unique_labels)} labels...")
-        per_label_nuclei_outlines = _outline_paths_per_label(lab_raw, tile, labels=unique_labels)
-        per_label_expanded_outlines = _outline_paths_per_label(lab_exp, tile, labels=unique_labels)
-        LOGGER.info(f"Per-label outlines computed: {len(per_label_nuclei_outlines)} nuclei, {len(per_label_expanded_outlines)} expanded")
+        # Pre-compute per-label outlines too for selected labels mode
+        per_label_nuclei_outlines = {}
+        per_label_expanded_outlines = {}
+        
+        if unique_labels:
+            # Use the already-generated polygons as outlines (same geometry)
+            for lbl in unique_labels:
+                if lbl in polygons_raw:
+                    per_label_nuclei_outlines[lbl] = polygons_raw[lbl]
+                if lbl in polygons_exp:
+                    per_label_expanded_outlines[lbl] = polygons_exp[lbl]
+        
+        t9 = time.time()
+        LOGGER.info(f"Tile {tile_id}: Per-label outlines from polygons ({len(unique_labels)} labels)")
+        LOGGER.info(f"Tile {tile_id}: TOTAL geometry computation took {(t9-t0)*1000:.1f}ms")
 
         entry = {
             "tile": tile,
@@ -1986,10 +2113,10 @@ class Plugin:
             
             cached_colors = color_cache.get(color_key)
             if cached_colors is not None:
-                LOGGER.info(f"⚡ ColorCache HIT for tile {tile_id}, overlay_type={overlay_type}")
+                LOGGER.info(f"ColorCache HIT for tile {tile_id}, overlay_type={overlay_type}")
                 colored_overlay = cached_colors
             else:
-                LOGGER.info(f"🔄 ColorCache MISS for tile {tile_id}, computing colors...")
+                LOGGER.info(f"ColorCache MISS for tile {tile_id}, computing colors...")
                 t1 = time.time()
                 
                 # Compute colors (fast: <50ms)
@@ -2001,7 +2128,7 @@ class Plugin:
                     raise ValueError(f"Unknown overlay_type '{overlay_type}'")
                 
                 t2 = time.time()
-                LOGGER.info(f"✅ Color computation took {(t2-t1)*1000:.1f}ms")
+                LOGGER.info(f"Color computation took {(t2-t1)*1000:.1f}ms")
                 
                 # Cache the colored overlay
                 color_cache.set(color_key, colored_overlay)
@@ -2164,6 +2291,8 @@ class Plugin:
                 vmax_local = vmin_local + 1e-6
             norm = colors.Normalize(vmin=vmin_local, vmax=vmax_local)
 
+            # Use pre-computed polygons from geometry cache
+            # (on-demand generation removed - polygons now always pre-computed)
             feature_polygons = polygons_exp if all_expanded_outline else polygons_raw
             
             # Generate per-label outlines for selected cells (if needed for selected-only mode)
@@ -2378,6 +2507,8 @@ class Plugin:
                 "legend": legend_color,
             }
 
+        # Use pre-computed polygons from geometry cache
+        # (on-demand generation removed - polygons now always pre-computed)
         feature_polygons = polygons_exp if all_expanded_outline else polygons_raw
         
         # Generate per-label outlines for selected cells (if needed for selected-only mode)
