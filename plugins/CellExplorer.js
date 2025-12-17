@@ -30,24 +30,30 @@ Bin2CellExplorer = {
     obs_col: { label: "Observation column", type: "select", default: "" },
     category: { label: "Category filter (optional)", type: "select", default: "" },
     render_mode: { label: "Render mode", type: "select", default: "fill", options: ["fill", "outline"] },
-    color_mode: { label: "Gene color mode", type: "select", default: "gradient", options: ["gradient", "binary", "solid"] },
+    color_mode: { label: "Gene color mode", type: "select", default: "gradient", options: ["gradient", "solid"] },
     gradient_color: { label: "Gradient color (optional)", type: "text", default: "#4285f4", attributes: { type: "color" } },
     gene_color: { label: "Gene color (solid mode)", type: "text", default: "#ff6b6b", attributes: { type: "color" } },
     expr_quantile: { label: "Expr. quantile (0-1)", type: "number", default: "" },
     top_n: { label: "Top N labels", type: "number", default: "" },
-    b2c_mode: { label: "Expand mode", type: "select", default: "fixed", options: ["fixed", "volume_ratio"] },
+    b2c_mode: { label: "Expand mode", type: "select", default: "none", options: ["none", "fixed", "volume_ratio"] },
     max_bin_distance: { label: "Max bin distance", type: "number", default: 2.0 },
     mpp: { label: "Microns per pixel", type: "number", default: 0.3 },
     bin_um: { label: "Bin size (µm)", type: "number", default: 2.0 },
     volume_ratio: { label: "Volume ratio", type: "number", default: 4.0 },
-    overlay_alpha: { label: "Overlay alpha (0-1)", type: "number", default: 0.5 },
-    highlight_color: { label: "Highlight color", type: "text", default: "#39ff14" },
-    highlight_width: { label: "Highlight width", type: "number", default: 2.0 },
-    all_expanded_outline: { label: "Show expanded outlines", type: "checkbox", default: false },
-    all_nuclei_outline: { label: "Show nuclei outlines", type: "checkbox", default: false },
+    render_mode: { label: "Render mode", type: "select", default: "fill", options: ["fill", "outline"] },
+    overlay_alpha: { label: "Overlay opacity (0-1)", type: "number", default: 0.7 },
+    highlight_color: { label: "Outline color", type: "text", default: "#39ff14", attributes: { type: "color" } },
+    highlight_width: { label: "Outline width", type: "number", default: 2.0 },
+    all_expanded_outline: { label: "Show expanded outlines (all cells)", type: "checkbox", default: false },
+    expanded_outlines_selected: { label: "Show expanded outlines (selected only)", type: "checkbox", default: false },
+    all_nuclei_outline: { label: "Show nuclei outlines (all cells)", type: "checkbox", default: false },
+    nuclei_outlines_selected: { label: "Show nuclei outlines (selected only)", type: "checkbox", default: true },
     nuclei_outline_color: { label: "Nuclei outline color", type: "text", default: "#000000", attributes: { type: "color" } },
     nuclei_outline_alpha: { label: "Nuclei outline opacity (0-1)", type: "number", default: 0.6 },
     apply_overlay_btn: { label: "Update overlay", type: "button" },
+
+
+
 
     _sec_export: { label: "Export & Presets", type: "section", collapsed: true },
     export_name: { label: "Export name (optional)", type: "text", default: "" },
@@ -80,21 +86,33 @@ Bin2CellExplorer.state = {
   filePickerModalId: null,
   filePickerField: null,
   lastOverlayPayload: null,
+  renderPayload: null,
+  geometryCache: {},
+  hiddenGenes: {},
+  hiddenCategories: {},
+  canvasOverlay: null,
+  canvasCtx: null,
   viewerHooksInstalled: false,
   overlayRefreshToken: null,
   cacheWarmStatus: null,
-  singleTileMode: false
+  singleTileMode: false,
+  // NEW: Track last request parameters for smart updates
+  lastRequest: {
+    geometry: null,  // { tile_id, b2c_mode, mpp, bin_um, volume_ratio, ... }
+    color: null,     // { overlay_type, gene, obs_col, category, color_mode, ... }
+    visual: null     // { overlay_alpha, render_mode, all_expanded_outline, ... }
+  }
 };
 
 Bin2CellExplorer._prefixes = ["Bin2CellExplorer_", "CellExplorer_"];
-Bin2CellExplorer._findElement = function(name) {
+Bin2CellExplorer._findElement = function (name) {
   for (let i = 0; i < Bin2CellExplorer._prefixes.length; i += 1) {
     const el = document.getElementById(Bin2CellExplorer._prefixes[i] + name);
     if (el) return el;
   }
   return null;
 };
-Bin2CellExplorer._domId = function(name) {
+Bin2CellExplorer._domId = function (name) {
   for (let i = 0; i < Bin2CellExplorer._prefixes.length; i += 1) {
     const id = Bin2CellExplorer._prefixes[i] + name;
     if (document.getElementById(id)) return id;
@@ -103,7 +121,7 @@ Bin2CellExplorer._domId = function(name) {
   return "CellExplorer_" + name;
 };
 
-Bin2CellExplorer.get = function(name) {
+Bin2CellExplorer.get = function (name) {
   let element = Bin2CellExplorer._findElement(name);
   if (!element) {
     return "";
@@ -130,7 +148,7 @@ Bin2CellExplorer.get = function(name) {
   return value == null ? "" : value;
 };
 
-Bin2CellExplorer.set = function(name, value) {
+Bin2CellExplorer.set = function (name, value) {
   let element = Bin2CellExplorer._findElement(name);
   if (!element) return;
   if (!(element.matches && element.matches("input, select, textarea"))) {
@@ -154,7 +172,7 @@ Bin2CellExplorer.set = function(name, value) {
   element.dispatchEvent(new Event("input", { bubbles: true }));
 };
 
-Bin2CellExplorer.init = function(container) {
+Bin2CellExplorer.init = function (container) {
   Bin2CellExplorer.state.container = container;
   container.classList.add("bin2cell-explorer-panel");
 
@@ -198,7 +216,7 @@ Bin2CellExplorer.init = function(container) {
   interfaceUtils.alert("Bin2Cell Explorer loaded");
 
   // Listen for file selection messages from web file browser iframe
-  window.addEventListener("message", function(event) {
+  window.addEventListener("message", function (event) {
     if (event.data && event.data.type === "b2c_file_selected") {
       Bin2CellExplorer.onWebFilePicked(event.data.field, event.data.path);
     }
@@ -206,9 +224,99 @@ Bin2CellExplorer.init = function(container) {
 
   Bin2CellExplorer.toggleOverlayInputs("gene");
   Bin2CellExplorer.updateDatasetMode();
+
+  // Set initial visibility for expansion and render params
+  Bin2CellExplorer.toggleExpansionParams("none");  // Default: hide all expansion params
+  Bin2CellExplorer.toggleRenderParams("fill");      // Default mode
 };
 
-Bin2CellExplorer.inputTrigger = function(inputName) {
+/**
+ * Set up dynamic show/hide of parameters based on dropdown values
+ */
+Bin2CellExplorer.setupConditionalVisibility = function () {
+  // Wait a bit for TissUUmaps to create the UI elements
+  setTimeout(function () {
+    // Helper to get the row element for a parameter
+    const getParamRow = function (paramName) {
+      // TissUUmaps typically creates inputs with IDs like "Bin2CellExplorer_paramName"
+      const prefixes = Bin2CellExplorer._prefixes;
+      for (let i = 0; i < prefixes.length; i++) {
+        const elem = document.getElementById(prefixes[i] + paramName);
+        if (elem && elem.closest) {
+          return elem.closest('.form-group, .row, tr');
+        }
+      }
+      return null;
+    };
+
+    // Update visibility based on b2c_mode
+    const updateExpansionVisibility = function () {
+      const mode = Bin2CellExplorer.get("b2c_mode") || "fixed";
+
+      const maxBinRow = getParamRow("max_bin_distance");
+      const mppRow = getParamRow("mpp");
+      const binUmRow = getParamRow("bin_um");
+      const volumeRow = getParamRow("volume_ratio");
+
+      // Show/hide based on mode
+      if (mode === "none") {
+        // Hide all expansion params
+        if (maxBinRow) maxBinRow.style.display = "none";
+        if (mppRow) mppRow.style.display = "none";
+        if (binUmRow) binUmRow.style.display = "none";
+        if (volumeRow) volumeRow.style.display = "none";
+      } else if (mode === "fixed") {
+        // Show fixed-mode params, hide volume params
+        if (maxBinRow) maxBinRow.style.display = "";
+        if (mppRow) mppRow.style.display = "";
+        if (binUmRow) binUmRow.style.display = "";
+        if (volumeRow) volumeRow.style.display = "none";
+      } else if (mode === "volume_ratio") {
+        // Hide max_bin_distance, show others
+        if (maxBinRow) maxBinRow.style.display = "none";
+        if (mppRow) mppRow.style.display = "";
+        if (binUmRow) binUmRow.style.display = "";
+        if (volumeRow) volumeRow.style.display = "";
+      }
+    };
+
+    // Update visibility based on render_mode
+    const updateRenderVisibility = function () {
+      const mode = Bin2CellExplorer.get("render_mode") || "fill";
+
+      const colorRow = getParamRow("highlight_color");
+      const widthRow = getParamRow("highlight_width");
+
+      // Only show highlight options when render_mode is "outline"
+      if (mode === "outline") {
+        if (colorRow) colorRow.style.display = "";
+        if (widthRow) widthRow.style.display = "";
+      } else {
+        if (colorRow) colorRow.style.display = "none";
+        if (widthRow) widthRow.style.display = "none";
+      }
+    };
+
+    // Initial update
+    updateExpansionVisibility();
+    updateRenderVisibility();
+
+    // Add change listeners
+    const b2cSelect = document.getElementById("Bin2CellExplorer_b2c_mode");
+    if (b2cSelect) {
+      b2cSelect.addEventListener("change", updateExpansionVisibility);
+    }
+
+    const renderSelect = document.getElementById("Bin2CellExplorer_render_mode");
+    if (renderSelect) {
+      renderSelect.addEventListener("change", updateRenderVisibility);
+    }
+
+    console.log("[CellExplorer] ✨ Conditional visibility initialized");
+  }, 500);  // Wait 500ms for UI to be created
+};
+
+Bin2CellExplorer.inputTrigger = function (inputName) {
   switch (inputName) {
     case "load_dataset_btn":
       Bin2CellExplorer.loadDataset();
@@ -230,6 +338,12 @@ Bin2CellExplorer.inputTrigger = function(inputName) {
       break;
     case "color_mode":
       Bin2CellExplorer.updateGeneColorControls();
+      break;
+    case "b2c_mode":
+      Bin2CellExplorer.toggleExpansionParams(Bin2CellExplorer.get("b2c_mode"));
+      break;
+    case "render_mode":
+      Bin2CellExplorer.toggleRenderParams(Bin2CellExplorer.get("render_mode"));
       break;
     case "apply_overlay_btn":
       Bin2CellExplorer.requestOverlay();
@@ -254,7 +368,7 @@ Bin2CellExplorer.inputTrigger = function(inputName) {
   }
 };
 
-Bin2CellExplorer.toggleOverlayInputs = function(mode) {
+Bin2CellExplorer.toggleOverlayInputs = function (mode) {
   const geneIds = ["genes", "color_mode", "gradient_color", "gene_color", "expr_quantile", "top_n"];
   const obsIds = ["obs_col", "category"];
   geneIds.forEach((id) => Bin2CellExplorer.toggleParam(id, mode === "gene"));
@@ -266,7 +380,32 @@ Bin2CellExplorer.toggleOverlayInputs = function(mode) {
   }
 };
 
-Bin2CellExplorer.toggleParam = function(name, visible) {
+Bin2CellExplorer.toggleExpansionParams = function (mode) {
+  // Show/hide expansion parameters based on b2c_mode
+  const fixedOnlyIds = ["max_bin_distance"];
+  const volumeOnlyIds = ["volume_ratio"];
+  const commonIds = ["mpp", "bin_um"];
+
+  if (mode === "none") {
+    // Hide all expansion parameters
+    fixedOnlyIds.forEach((id) => Bin2CellExplorer.toggleParam(id, false));
+    volumeOnlyIds.forEach((id) => Bin2CellExplorer.toggleParam(id, false));
+    commonIds.forEach((id) => Bin2CellExplorer.toggleParam(id, false));
+  } else {
+    // Show/hide based on mode
+    fixedOnlyIds.forEach((id) => Bin2CellExplorer.toggleParam(id, mode === "fixed"));
+    volumeOnlyIds.forEach((id) => Bin2CellExplorer.toggleParam(id, mode === "volume_ratio"));
+    commonIds.forEach((id) => Bin2CellExplorer.toggleParam(id, true));
+  }
+};
+
+Bin2CellExplorer.toggleRenderParams = function (mode) {
+  // Show/hide highlight parameters based on render_mode
+  const outlineOnlyIds = ["highlight_color", "highlight_width"];
+  outlineOnlyIds.forEach((id) => Bin2CellExplorer.toggleParam(id, mode === "outline"));
+};
+
+Bin2CellExplorer.toggleParam = function (name, visible) {
   const element = Bin2CellExplorer._findElement(name);
   if (!element) return;
   let wrapper = element.closest(".form-group, .row, .input-group");
@@ -276,7 +415,7 @@ Bin2CellExplorer.toggleParam = function(name, visible) {
   if (wrapper) wrapper.style.display = visible ? "" : "none";
 };
 
-Bin2CellExplorer.ensureObject = function(payload) {
+Bin2CellExplorer.ensureObject = function (payload) {
   if (!payload) return {};
   if (typeof payload === "string") {
     try {
@@ -289,18 +428,18 @@ Bin2CellExplorer.ensureObject = function(payload) {
   return payload;
 };
 
-Bin2CellExplorer.setStatus = function(msg) {
+Bin2CellExplorer.setStatus = function (msg) {
   const status = document.getElementById("Bin2CellExplorer_status") || document.getElementById("CellExplorer_status");
   if (status) status.textContent = msg || "";
 };
 
-Bin2CellExplorer.updateGeneColorControls = function() {
+Bin2CellExplorer.updateGeneColorControls = function () {
   const mode = Bin2CellExplorer.get("color_mode");
   Bin2CellExplorer.toggleParam("gradient_color", mode === "gradient");
   Bin2CellExplorer.toggleParam("gene_color", mode === "solid");
 };
 
-Bin2CellExplorer.browseForFile = function(field) {
+Bin2CellExplorer.browseForFile = function (field) {
   const current = Bin2CellExplorer.get(field) || "";
   const payload = {
     field: field,
@@ -309,7 +448,7 @@ Bin2CellExplorer.browseForFile = function(field) {
   Bin2CellExplorer.api(
     "pick_file",
     payload,
-    function(resp) {
+    function (resp) {
       const data = Bin2CellExplorer.ensureObject(resp);
       if (data && data.status === "web") {
         Bin2CellExplorer.openWebFileBrowser(field, data);
@@ -337,7 +476,7 @@ Bin2CellExplorer.browseForFile = function(field) {
   );
 };
 
-Bin2CellExplorer.openWebFileBrowser = function(field, data) {
+Bin2CellExplorer.openWebFileBrowser = function (field, data) {
   const modalUID = "Bin2CellExplorer_filepicker";
   Bin2CellExplorer.state.filePickerField = field;
   Bin2CellExplorer.state.filePickerModalId = modalUID;
@@ -350,7 +489,7 @@ Bin2CellExplorer.openWebFileBrowser = function(field, data) {
       field: field,
       start_rel: data.start_rel || "",
     },
-    function(response) {
+    function (response) {
       console.log("DEBUG: Got filetree response:", response);
       const data = Bin2CellExplorer.ensureObject(response);
       const iframe = document.createElement("iframe");
@@ -366,15 +505,15 @@ Bin2CellExplorer.openWebFileBrowser = function(field, data) {
         extraAttributes: { class: "btn btn-primary mx-2" },
       });
       closeBtn.innerText = "Cancel";
-      closeBtn.addEventListener("click", function() {
+      closeBtn.addEventListener("click", function () {
         Bin2CellExplorer.closeWebFileBrowser();
       });
       const buttons = document.createElement("div");
       buttons.appendChild(closeBtn);
 
       interfaceUtils.generateModal("Select file", content, buttons, modalUID);
-      setTimeout(function() {
-        $(`#${modalUID}_modal`).on("hidden.bs.modal", function() {
+      setTimeout(function () {
+        $(`#${modalUID}_modal`).on("hidden.bs.modal", function () {
           Bin2CellExplorer.closeWebFileBrowser(true);
         });
       }, 0);
@@ -383,7 +522,7 @@ Bin2CellExplorer.openWebFileBrowser = function(field, data) {
   );
 };
 
-Bin2CellExplorer.closeWebFileBrowser = function(skipHide) {
+Bin2CellExplorer.closeWebFileBrowser = function (skipHide) {
   const modalUID = Bin2CellExplorer.state.filePickerModalId;
   if (!skipHide && modalUID) {
     $(`#${modalUID}_modal`).modal("hide");
@@ -392,7 +531,7 @@ Bin2CellExplorer.closeWebFileBrowser = function(skipHide) {
   Bin2CellExplorer.state.filePickerField = null;
 };
 
-Bin2CellExplorer.onWebFilePicked = function(field, absolutePath) {
+Bin2CellExplorer.onWebFilePicked = function (field, absolutePath) {
   if (!absolutePath || field !== Bin2CellExplorer.state.filePickerField) {
     return;
   }
@@ -407,7 +546,7 @@ Bin2CellExplorer.onWebFilePicked = function(field, absolutePath) {
   Bin2CellExplorer.closeWebFileBrowser();
 };
 
-Bin2CellExplorer.loadDataset = function() {
+Bin2CellExplorer.loadDataset = function () {
   const he_path = Bin2CellExplorer.get("he_path");
   const labels_path = Bin2CellExplorer.get("labels_path");
   const adata_path = Bin2CellExplorer.get("adata_path");
@@ -453,14 +592,14 @@ Bin2CellExplorer.loadDataset = function() {
   Bin2CellExplorer.api(
     "load_dataset",
     payload,
-    function(resp) {
+    function (resp) {
       Bin2CellExplorer.onDatasetLoaded(Bin2CellExplorer.ensureObject(resp));
     },
     Bin2CellExplorer.handleError
   );
 };
 
-Bin2CellExplorer.onDatasetLoaded = function(data) {
+Bin2CellExplorer.onDatasetLoaded = function (data) {
   Bin2CellExplorer.state.datasetLoaded = true;
   Bin2CellExplorer.state.tiles = data.tiles || [];
   Bin2CellExplorer.state.obsColumns = data.obs_columns || [];
@@ -473,7 +612,11 @@ Bin2CellExplorer.onDatasetLoaded = function(data) {
   Bin2CellExplorer.state.datasetId = data.dataset_id;
   Bin2CellExplorer.state.hePath = data.he_path;
   Bin2CellExplorer.state.slideShape = data.shape;
-  
+  Bin2CellExplorer.state.geometryCache = {};
+  Bin2CellExplorer.state.hiddenGenes = {};
+  Bin2CellExplorer.state.hiddenCategories = {};
+  Bin2CellExplorer.state.renderPayload = null;
+
   // Update the input field with the normalized path (relative for web server, absolute for standalone)
   // This prevents TissUUmaps from trying to add the layer with the wrong path format
   if (data.he_path) {
@@ -503,7 +646,7 @@ Bin2CellExplorer.onDatasetLoaded = function(data) {
   }
   Bin2CellExplorer.updateDatasetMode();
 
-  Bin2CellExplorer.populateSelect("tile_id", Bin2CellExplorer.state.tiles.map(function(tile) { return tile.id; }));
+  Bin2CellExplorer.populateSelect("tile_id", Bin2CellExplorer.state.tiles.map(function (tile) { return tile.id; }));
   Bin2CellExplorer.populateSelect("obs_col", Bin2CellExplorer.state.obsColumns);
   Bin2CellExplorer.populateSelect("category", [""]);
   Bin2CellExplorer.populateSelect("obsm_key", data.available_obsm || [], data.obsm_key);
@@ -531,22 +674,22 @@ Bin2CellExplorer.onDatasetLoaded = function(data) {
   if (Bin2CellExplorer.state.cacheWarmStatus && Bin2CellExplorer.state.cacheWarmStatus.active) {
     Bin2CellExplorer.setStatus(
       "Dataset loaded (" +
-        Bin2CellExplorer.state.tiles.length +
-        " tiles). Cache warming " +
-        Bin2CellExplorer.state.cacheWarmStatus.progress +
-        "/" +
-        (Bin2CellExplorer.state.cacheWarmStatus.total || "?") +
-        "…"
+      Bin2CellExplorer.state.tiles.length +
+      " tiles). Cache warming " +
+      Bin2CellExplorer.state.cacheWarmStatus.progress +
+      "/" +
+      (Bin2CellExplorer.state.cacheWarmStatus.total || "?") +
+      "…"
     );
   } else {
     Bin2CellExplorer.setStatus("Dataset loaded (" + Bin2CellExplorer.state.tiles.length + " tiles)");
   }
 };
 
-Bin2CellExplorer.populateSelect = function(name, options, selected) {
+Bin2CellExplorer.populateSelect = function (name, options, selected) {
   const domId = Bin2CellExplorer._domId(name);
   interfaceUtils.cleanSelect(domId);
-  options.forEach(function(opt) {
+  options.forEach(function (opt) {
     interfaceUtils.addSingleElementToSelect(domId, String(opt));
   });
   if (selected !== undefined && selected !== null && selected !== "") {
@@ -568,10 +711,10 @@ Bin2CellExplorer.populateSelect = function(name, options, selected) {
   }
 };
 
-Bin2CellExplorer.attachTileSelectListener = function() {
+Bin2CellExplorer.attachTileSelectListener = function () {
   const select = Bin2CellExplorer._findElement("tile_id");
   if (!select || select.__bin2cell_tile_listener) return;
-  select.addEventListener("change", function() {
+  select.addEventListener("change", function () {
     const value = parseInt(select.value, 10);
     if (!isNaN(value)) {
       Bin2CellExplorer.state.selectedTileId = value;
@@ -582,19 +725,19 @@ Bin2CellExplorer.attachTileSelectListener = function() {
   select.__bin2cell_tile_listener = true;
 };
 
-Bin2CellExplorer.attachObsSelectListener = function() {
+Bin2CellExplorer.attachObsSelectListener = function () {
   const select = Bin2CellExplorer._findElement("obs_col");
   if (!select || select.__bin2cell_obs_listener) return;
-  select.addEventListener("change", function() {
+  select.addEventListener("change", function () {
     Bin2CellExplorer.onObsColumnChange(select.value || "");
   });
   select.__bin2cell_obs_listener = true;
 };
 
-Bin2CellExplorer.attachCategorySelectListener = function() {
+Bin2CellExplorer.attachCategorySelectListener = function () {
   const select = Bin2CellExplorer._findElement("category");
   if (!select || select.__bin2cell_category_listener) return;
-  select.addEventListener("change", function() {
+  select.addEventListener("change", function () {
     const col = Bin2CellExplorer.get("obs_col");
     if (col) {
       Bin2CellExplorer.state.obsCategorySelections[col] = select.value || "";
@@ -603,7 +746,7 @@ Bin2CellExplorer.attachCategorySelectListener = function() {
   select.__bin2cell_category_listener = true;
 };
 
-Bin2CellExplorer.onObsColumnChange = function(column, options) {
+Bin2CellExplorer.onObsColumnChange = function (column, options) {
   if (!Bin2CellExplorer.state.datasetLoaded) return;
   const value = column || "";
   Bin2CellExplorer.state.selectedObsCol = value || null;
@@ -616,7 +759,7 @@ Bin2CellExplorer.onObsColumnChange = function(column, options) {
   Bin2CellExplorer.ensureObsMetadata(value);
 };
 
-Bin2CellExplorer.ensureObsMetadata = function(column) {
+Bin2CellExplorer.ensureObsMetadata = function (column) {
   const col = column || "";
   Bin2CellExplorer.populateCategorySelect(col);
   if (!col) return;
@@ -631,20 +774,20 @@ Bin2CellExplorer.ensureObsMetadata = function(column) {
   Bin2CellExplorer.api(
     "describe_obs_column",
     { obs_col: col },
-    function(resp) {
+    function (resp) {
       delete Bin2CellExplorer.state.obsMetadataRequests[col];
       const data = Bin2CellExplorer.ensureObject(resp) || {};
       Bin2CellExplorer.state.obsMetadata[col] = data;
       Bin2CellExplorer.populateCategorySelect(col);
     },
-    function(jqXHR, textStatus, errorThrown) {
+    function (jqXHR, textStatus, errorThrown) {
       delete Bin2CellExplorer.state.obsMetadataRequests[col];
       Bin2CellExplorer.handleError(jqXHR, textStatus, errorThrown);
     }
   );
 };
 
-Bin2CellExplorer.populateCategorySelect = function(column) {
+Bin2CellExplorer.populateCategorySelect = function (column) {
   const metadata = column ? Bin2CellExplorer.state.obsMetadata[column] : null;
   const categories = (metadata && Array.isArray(metadata.categories)) ? metadata.categories.slice() : [];
   const options = [""].concat(categories);
@@ -668,30 +811,88 @@ Bin2CellExplorer.populateCategorySelect = function(column) {
   }
 };
 
-Bin2CellExplorer.requestOverlay = function() {
+Bin2CellExplorer.requestOverlay = function () {
   if (!Bin2CellExplorer.state.datasetLoaded) {
     interfaceUtils.alert("Load a dataset first.");
     return;
   }
+
   const overlayType = Bin2CellExplorer.get("overlay_type") || "gene";
   const payload = Bin2CellExplorer.collectOverlayParams();
   payload.overlay_type = overlayType;
+  const tileId = Number(payload.tile_id);
+
+  // SMART UPDATE: Detect what changed
+  const changeType = Bin2CellExplorer.detectChangeType(payload);
+
+  if (changeType === 'NONE') {
+    console.log('[CellExplorer] ⏭️  No changes detected, skipping update');
+    return;
+  }
+
+  if (changeType === 'VISUAL') {
+    console.log('[CellExplorer] ⚡ Visual-only change, updating instantly!');
+    const startTime = performance.now();
+    Bin2CellExplorer.updateVisualOnly(payload);
+    const elapsed = performance.now() - startTime;
+    Bin2CellExplorer.setStatus(`Overlay updated (${elapsed.toFixed(1)}ms)`);
+    return;
+  }
+
+  // For COLOR or GEOMETRY changes, make backend request
+  console.log(`[CellExplorer] 🔄 ${changeType} change, requesting from backend...`);
+  payload.include_geometry = Bin2CellExplorer.shouldRequestGeometry(tileId, payload);
 
   Bin2CellExplorer.setStatus("Computing overlay…");
   Bin2CellExplorer.api(
     "get_overlay",
     payload,
-    function(resp) {
+    function (resp) {
       const data = Bin2CellExplorer.ensureObject(resp);
       Bin2CellExplorer.renderOverlay(data);
-      Bin2CellExplorer.renderLegend(data);
+      Bin2CellExplorer.updateLastRequest(payload);  // Track successful request
       Bin2CellExplorer.setStatus("Overlay ready (" + data.overlay_type + ")");
     },
     Bin2CellExplorer.handleError
   );
 };
 
-Bin2CellExplorer.renderTileOverview = function() {
+/**
+ * Update visual parameters only (instant, no backend request).
+ * This is called when ONLY visual parameters changed.
+ */
+Bin2CellExplorer.updateVisualOnly = function (params) {
+  const payload = Bin2CellExplorer.state.lastOverlayPayload;
+
+  if (!payload) {
+    console.warn('[CellExplorer] ⚠️  No cached overlay data, making full backend request');
+    Bin2CellExplorer.state.lastRequest = { geometry: null, color: null, visual: null };
+    return Bin2CellExplorer.requestOverlay();
+  }
+
+  // Update visual parameters in cached payload
+  payload.overlay_alpha = parseFloat(params.overlay_alpha) || 0.7;
+  payload.render_mode = params.render_mode || "fill";
+  payload.highlight_color = params.highlight_color || "#39ff14";
+  payload.highlight_width = parseFloat(params.highlight_width) || 2.0;
+  payload.all_expanded_outline = params.all_expanded_outline;
+  payload.expanded_outlines_selected = params.expanded_outlines_selected;
+  payload.all_nuclei_outline = params.all_nuclei_outline;
+  payload.nuclei_outlines_selected = params.nuclei_outlines_selected;
+  payload.nuclei_outline_color = params.nuclei_outline_color || "#000000";
+  payload.nuclei_outline_alpha = parseFloat(params.nuclei_outline_alpha) || 0.6;
+
+  // Re-render canvas with updated parameters (fast!)
+  Bin2CellExplorer.drawOverlayToCanvas(payload);
+  Bin2CellExplorer.state.renderPayload = payload;
+
+  // Update tracked visual params
+  Bin2CellExplorer.updateLastRequest(params);
+
+  console.log('[CellExplorer] ✨ Visual update complete');
+};
+
+Bin2CellExplorer.renderTileOverview = function () {
   const canvas = Bin2CellExplorer.state.tileOverviewCanvas;
   const hint = document.getElementById("Bin2CellExplorer_tile_overview_hint");
   if (!canvas) return;
@@ -729,7 +930,7 @@ Bin2CellExplorer.renderTileOverview = function() {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  tiles.forEach(function(tile) {
+  tiles.forEach(function (tile) {
     const x = margin + tile.c0 * scale;
     const y = margin + tile.r0 * scale;
     const w = (tile.c1 - tile.c0) * scale;
@@ -752,7 +953,7 @@ Bin2CellExplorer.renderTileOverview = function() {
   Bin2CellExplorer.state.tileOverviewScale = { scale: scale, margin: margin };
 };
 
-Bin2CellExplorer.onTileOverviewClick = function(evt) {
+Bin2CellExplorer.onTileOverviewClick = function (evt) {
   const canvas = Bin2CellExplorer.state.tileOverviewCanvas;
   const scaleInfo = Bin2CellExplorer.state.tileOverviewScale;
   if (!canvas || !scaleInfo || !Bin2CellExplorer.state.tiles.length) return;
@@ -762,7 +963,7 @@ Bin2CellExplorer.onTileOverviewClick = function(evt) {
   const slideX = (x - scaleInfo.margin) / scaleInfo.scale;
   const slideY = (y - scaleInfo.margin) / scaleInfo.scale;
   if (slideX < 0 || slideY < 0) return;
-  const tile = Bin2CellExplorer.state.tiles.find(function(t) {
+  const tile = Bin2CellExplorer.state.tiles.find(function (t) {
     return slideX >= t.c0 && slideX < t.c1 && slideY >= t.r0 && slideY < t.r1;
   });
   if (!tile) return;
@@ -772,8 +973,8 @@ Bin2CellExplorer.onTileOverviewClick = function(evt) {
   Bin2CellExplorer.panToTile(tile.id, true);
 };
 
-Bin2CellExplorer.panToTile = function(tileId, animate) {
-  const tile = Bin2CellExplorer.state.tiles.find(function(t) { return t.id === tileId; });
+Bin2CellExplorer.panToTile = function (tileId, animate) {
+  const tile = Bin2CellExplorer.state.tiles.find(function (t) { return t.id === tileId; });
   const shape = Bin2CellExplorer.state.slideShape;
   if (!tile || !shape) return;
   const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
@@ -789,7 +990,7 @@ Bin2CellExplorer.panToTile = function(tileId, animate) {
   viewer.viewport.fitBounds(rect, animate !== false);
 };
 
-Bin2CellExplorer.collectOverlayParams = function() {
+Bin2CellExplorer.collectOverlayParams = function () {
   const params = {
     tile_id: Bin2CellExplorer.get("tile_id"),
     overlay_type: Bin2CellExplorer.get("overlay_type"),
@@ -811,14 +1012,123 @@ Bin2CellExplorer.collectOverlayParams = function() {
     highlight_color: Bin2CellExplorer.get("highlight_color"),
     highlight_width: Bin2CellExplorer.get("highlight_width"),
     all_expanded_outline: Bin2CellExplorer.isChecked("all_expanded_outline"),
+    expanded_outlines_selected: Bin2CellExplorer.isChecked("expanded_outlines_selected"),
     all_nuclei_outline: Bin2CellExplorer.isChecked("all_nuclei_outline"),
+    nuclei_outlines_selected: Bin2CellExplorer.isChecked("nuclei_outlines_selected"),
     nuclei_outline_color: Bin2CellExplorer.get("nuclei_outline_color"),
     nuclei_outline_alpha: Bin2CellExplorer.get("nuclei_outline_alpha")
   };
   return params;
 };
 
-Bin2CellExplorer.exportOverlay = function() {
+Bin2CellExplorer.geometrySignature = function (payload) {
+  if (!payload) return "";
+  const tileId = payload.tile_id != null ? Number(payload.tile_id) : -1;
+  return [
+    tileId,
+    payload.b2c_mode,
+    payload.max_bin_distance,
+    payload.mpp,
+    payload.bin_um,
+    payload.volume_ratio,
+    payload.pad_factor || 2
+  ].join("|");
+};
+
+/**
+ * Detect what type of parameters changed.
+ * Returns: 'VISUAL' | 'COLOR' | 'GEOMETRY' | 'NONE'
+ */
+Bin2CellExplorer.detectChangeType = function (newParams) {
+  const last = Bin2CellExplorer.state.lastRequest;
+
+  // First request ever
+  if (!last.geometry && !last.color && !last.visual) {
+    return 'GEOMETRY';
+  }
+
+  // Check geometry parameters
+  const geometryParams = ['tile_id', 'b2c_mode', 'max_bin_distance', 'mpp', 'bin_um', 'volume_ratio'];
+  for (let i = 0; i < geometryParams.length; i++) {
+    const param = geometryParams[i];
+    if (String(newParams[param]) !== String(last.geometry[param])) {
+      console.log(`[CellExplorer] Geometry changed: ${param} (${last.geometry[param]} → ${newParams[param]})`);
+      return 'GEOMETRY';
+    }
+  }
+
+  // Check color parameters
+  const colorParams = ['overlay_type', 'genes', 'obs_col', 'category', 'color_mode', 'gradient_color', 'expr_quantile'];
+  for (let i = 0; i < colorParams.length; i++) {
+    const param = colorParams[i];
+    if (String(newParams[param] || '') !== String(last.color[param] || '')) {
+      console.log(`[CellExplorer] Color changed: ${param} (${last.color[param]} → ${newParams[param]})`);
+      return 'COLOR';
+    }
+  }
+
+  // Check visual parameters
+  const visualParams = ['overlay_alpha', 'render_mode', 'highlight_color', 'highlight_width',
+    'all_expanded_outline', 'expanded_outlines_selected', 'all_nuclei_outline', 'nuclei_outlines_selected',
+    'nuclei_outline_color', 'nuclei_outline_alpha'];
+  for (let i = 0; i < visualParams.length; i++) {
+    const param = visualParams[i];
+    if (String(newParams[param] || '') !== String(last.visual[param] || '')) {
+      console.log(`[CellExplorer] Visual changed: ${param} (${last.visual[param]} → ${newParams[param]})`);
+      return 'VISUAL';
+    }
+  }
+
+  return 'NONE';  // No changes
+};
+
+/**
+ * Update cached parameters after successful request.
+ */
+Bin2CellExplorer.updateLastRequest = function (params) {
+  Bin2CellExplorer.state.lastRequest = {
+    geometry: {
+      tile_id: params.tile_id,
+      b2c_mode: params.b2c_mode,
+      max_bin_distance: params.max_bin_distance,
+      mpp: params.mpp,
+      bin_um: params.bin_um,
+      volume_ratio: params.volume_ratio,
+      pad_factor: params.pad_factor || 2
+    },
+    color: {
+      overlay_type: params.overlay_type,
+      genes: params.genes,
+      obs_col: params.obs_col,
+      category: params.category,
+      color_mode: params.color_mode,
+      gradient_color: params.gradient_color,
+      expr_quantile: params.expr_quantile
+    },
+    visual: {
+      overlay_alpha: params.overlay_alpha,
+      render_mode: params.render_mode,
+      highlight_color: params.highlight_color,
+      highlight_width: params.highlight_width,
+      all_expanded_outline: params.all_expanded_outline,
+      expanded_outlines_selected: params.expanded_outlines_selected,
+      all_nuclei_outline: params.all_nuclei_outline,
+      nuclei_outlines_selected: params.nuclei_outlines_selected,
+      nuclei_outline_color: params.nuclei_outline_color,
+      nuclei_outline_alpha: params.nuclei_outline_alpha
+    }
+  };
+};
+
+Bin2CellExplorer.shouldRequestGeometry = function (tileId, params) {
+  if (tileId == null || isNaN(tileId)) return true;
+  const sig = Bin2CellExplorer.geometrySignature(params);
+  const cached = Bin2CellExplorer.state.geometryCache[tileId];
+  if (!cached) return true;
+  return cached.signature !== sig;
+};
+
+Bin2CellExplorer.exportOverlay = function () {
   if (!Bin2CellExplorer.state.datasetLoaded) {
     interfaceUtils.alert("Load a dataset first.");
     return;
@@ -828,7 +1138,7 @@ Bin2CellExplorer.exportOverlay = function() {
   Bin2CellExplorer.api(
     "export_overlay",
     params,
-    function(resp) {
+    function (resp) {
       const data = Bin2CellExplorer.ensureObject(resp);
       Bin2CellExplorer.setStatus("GeoJSON written to " + data.path);
       interfaceUtils.alert("Overlay exported:\n" + data.path);
@@ -837,11 +1147,11 @@ Bin2CellExplorer.exportOverlay = function() {
   );
 };
 
-Bin2CellExplorer.collectPresetConfig = function() {
+Bin2CellExplorer.collectPresetConfig = function () {
   return Bin2CellExplorer.collectOverlayParams();
 };
 
-Bin2CellExplorer.savePreset = function() {
+Bin2CellExplorer.savePreset = function () {
   const name = (Bin2CellExplorer.get("save_preset_name") || "").trim();
   if (!name) {
     interfaceUtils.alert("Provide a preset name.");
@@ -854,7 +1164,7 @@ Bin2CellExplorer.savePreset = function() {
   Bin2CellExplorer.api(
     "save_preset",
     payload,
-    function(resp) {
+    function (resp) {
       const data = Bin2CellExplorer.ensureObject(resp);
       Bin2CellExplorer.setStatus("Preset saved.");
       Bin2CellExplorer.requestPresets(name);
@@ -863,11 +1173,11 @@ Bin2CellExplorer.savePreset = function() {
   );
 };
 
-Bin2CellExplorer.requestPresets = function(selectName) {
+Bin2CellExplorer.requestPresets = function (selectName) {
   Bin2CellExplorer.api(
     "list_presets",
     {},
-    function(resp) {
+    function (resp) {
       const data = Bin2CellExplorer.ensureObject(resp);
       Bin2CellExplorer.state.presets = data.presets || {};
       const names = Object.keys(Bin2CellExplorer.state.presets);
@@ -877,7 +1187,7 @@ Bin2CellExplorer.requestPresets = function(selectName) {
   );
 };
 
-Bin2CellExplorer.applySelectedPreset = function() {
+Bin2CellExplorer.applySelectedPreset = function () {
   const select = Bin2CellExplorer.get("preset_select");
   if (!select || !(select in Bin2CellExplorer.state.presets)) {
     interfaceUtils.alert("Select a preset first.");
@@ -887,7 +1197,7 @@ Bin2CellExplorer.applySelectedPreset = function() {
   if (!config) return;
   let pendingCategory = null;
   let pendingObsCol = null;
-  Object.keys(config).forEach(function(key) {
+  Object.keys(config).forEach(function (key) {
     if (key === "category") {
       pendingCategory = config[key] || "";
       return;
@@ -912,7 +1222,7 @@ Bin2CellExplorer.applySelectedPreset = function() {
   Bin2CellExplorer.setStatus("Preset applied: " + select);
 };
 
-Bin2CellExplorer.populatePresetPreview = function() {
+Bin2CellExplorer.populatePresetPreview = function () {
   const select = Bin2CellExplorer.get("preset_select");
   if (!select) return;
   const preset = Bin2CellExplorer.state.presets[select];
@@ -920,7 +1230,7 @@ Bin2CellExplorer.populatePresetPreview = function() {
   Bin2CellExplorer.setStatus("Preset '" + select + "' ready to apply.");
 };
 
-Bin2CellExplorer.deleteSelectedPreset = function() {
+Bin2CellExplorer.deleteSelectedPreset = function () {
   const select = Bin2CellExplorer.get("preset_select");
   if (!select || !(select in Bin2CellExplorer.state.presets)) {
     interfaceUtils.alert("Select a preset to delete.");
@@ -929,7 +1239,7 @@ Bin2CellExplorer.deleteSelectedPreset = function() {
   Bin2CellExplorer.api(
     "delete_preset",
     { name: select },
-    function() {
+    function () {
       Bin2CellExplorer.setStatus("Preset deleted: " + select);
       Bin2CellExplorer.requestPresets();
     },
@@ -937,7 +1247,7 @@ Bin2CellExplorer.deleteSelectedPreset = function() {
   );
 };
 
-Bin2CellExplorer.handleError = function(jqXHR, textStatus, errorThrown) {
+Bin2CellExplorer.handleError = function (jqXHR, textStatus, errorThrown) {
   let message = "";
   if (jqXHR) {
     if (jqXHR.responseJSON) {
@@ -964,26 +1274,26 @@ Bin2CellExplorer.handleError = function(jqXHR, textStatus, errorThrown) {
   interfaceUtils.alert("Bin2Cell Explorer error:\n" + message);
 };
 
-Bin2CellExplorer.isChecked = function(name) {
+Bin2CellExplorer.isChecked = function (name) {
   const el = Bin2CellExplorer._findElement(name);
   return !!(el && el.checked);
 };
 
-Bin2CellExplorer.setCheckbox = function(name, value) {
+Bin2CellExplorer.setCheckbox = function (name, value) {
   const el = Bin2CellExplorer._findElement(name);
   if (el) {
     el.checked = !!value;
   }
 };
 
-Bin2CellExplorer.updateDatasetMode = function() {
+Bin2CellExplorer.updateDatasetMode = function () {
   const single = Bin2CellExplorer.isChecked("single_tile_mode");
   Bin2CellExplorer.toggleDatasetControl("tile_cache_size", !single);
   Bin2CellExplorer.toggleDatasetControl("warm_cache", !single);
   Bin2CellExplorer.toggleDatasetControl("warm_cache_tiles", !single);
 };
 
-Bin2CellExplorer.toggleDatasetControl = function(name, enabled) {
+Bin2CellExplorer.toggleDatasetControl = function (name, enabled) {
   const el = Bin2CellExplorer._findElement(name);
   if (!el) return;
   el.disabled = !enabled;
@@ -993,134 +1303,345 @@ Bin2CellExplorer.toggleDatasetControl = function(name, enabled) {
   }
 };
 
-Bin2CellExplorer.renderOverlay = function(data) {
-  Bin2CellExplorer.state.overlays = data;
-  Bin2CellExplorer.state.lastOverlayPayload = data;
-  const layer = Bin2CellExplorer.ensureSvgLayer();
-  if (!layer) return;
+Bin2CellExplorer.ensureCanvasOverlay = function () {
+  const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
+  if (!viewer) return null;
+  const container = viewer.container || viewer.canvas || viewer.element;
+  if (!container) return null;
+  if (!Bin2CellExplorer.state.canvasOverlay) {
+    const canvas = document.createElement("canvas");
+    canvas.id = "Bin2CellExplorer_canvas_overlay";
+    canvas.style.position = "absolute";
+    canvas.style.top = "0";
+    canvas.style.left = "0";
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    canvas.style.pointerEvents = "none";
+    canvas.style.zIndex = 10;
+    container.appendChild(canvas);
+    Bin2CellExplorer.state.canvasOverlay = canvas;
+    Bin2CellExplorer.state.canvasCtx = canvas.getContext("2d");
+    // Hide legacy SVG layer if present to avoid double rendering
+    if (Bin2CellExplorer.state.d3layer && Bin2CellExplorer.state.d3layer.remove) {
+      Bin2CellExplorer.state.d3layer.remove();
+      Bin2CellExplorer.state.d3layer = null;
+    }
+  }
+  return Bin2CellExplorer.state.canvasOverlay;
+};
 
-  layer.selectAll("*").remove();
-  Bin2CellExplorer.state.layers = {
-    gene: {},
-    categories: {},
-    outlines: {}
-  };
+Bin2CellExplorer.projectPoint = function (image, viewer, pt) {
+  const vp = image.imageToViewportCoordinates(pt[0], pt[1], true);
+  const px = viewer.viewport.pixelFromPoint(vp, true);
+  return px;
+};
 
-  if (data.overlay_type === "gene") {
-    (data.overlays || []).forEach(function(geneOverlay) {
-      Bin2CellExplorer.drawGeneOverlay(layer, geneOverlay);
+Bin2CellExplorer.drawPolygonList = function (ctx, polygons, style, projectFn) {
+  if (!polygons || !polygons.length) return;
+  polygons.forEach(function (poly) {
+    if (!poly || poly.length < 3) return;
+    const path = new Path2D();
+    poly.forEach(function (pt, idx) {
+      const screen = projectFn(pt);
+      if (idx === 0) {
+        path.moveTo(screen.x, screen.y);
+      } else {
+        path.lineTo(screen.x, screen.y);
+      }
     });
-  } else if (data.overlay_type === "observation") {
-    Bin2CellExplorer.drawObservationOverlay(layer, data);
+    path.closePath();
+    if (style.fill) {
+      ctx.fillStyle = style.fill;
+      ctx.fill(path);
+    }
+    if (style.stroke) {
+      ctx.strokeStyle = style.stroke;
+      ctx.lineWidth = style.strokeWidth || 1.0;
+      ctx.stroke(path);
+    } else if (style.fill) {
+      // Add subtle border to filled cells to reduce "floating" effect
+      ctx.strokeStyle = "rgba(0,0,0,0.15)";
+      ctx.lineWidth = 0.5;
+      ctx.stroke(path);
+    }
+  });
+};
+
+Bin2CellExplorer.drawLineList = function (ctx, lines, style, projectFn) {
+  if (!lines || !lines.length) return;
+  ctx.strokeStyle = style.stroke || "rgba(150,150,150,0.6)";
+  ctx.lineWidth = style.strokeWidth || 1.0;
+  lines.forEach(function (line) {
+    if (!line || line.length < 2) return;
+    const path = new Path2D();
+    line.forEach(function (pt, idx) {
+      const screen = projectFn(pt);
+      if (idx === 0) {
+        path.moveTo(screen.x, screen.y);
+      } else {
+        path.lineTo(screen.x, screen.y);
+      }
+    });
+    ctx.stroke(path);
+  });
+};
+
+Bin2CellExplorer.inflateGeometry = function (data) {
+  if (!data || !data.tile) return data;
+  const tileId = data.tile.id;
+  const sig = Bin2CellExplorer.geometrySignature(data);
+  if (data.geometry) {
+    Bin2CellExplorer.state.geometryCache[tileId] = {
+      signature: sig,
+      geometry: data.geometry
+    };
+  }
+  const cached = Bin2CellExplorer.state.geometryCache[tileId];
+  if (!cached || !cached.geometry) {
+    return data;
   }
 
-  Bin2CellExplorer.drawOutlines(layer, data);
+  const geom = cached.geometry;
+  const result = JSON.parse(JSON.stringify(data));
+  const useExpanded = !!result.all_expanded_outline;
+  const polySource = useExpanded ? geom.polygons_exp : geom.polygons_raw;
+
+  if (!result.expanded_outline || !result.expanded_outline.length) {
+    result.expanded_outline = geom.outline_exp || [];
+  }
+  if (!result.nuclei_outline || !result.nuclei_outline.length) {
+    result.nuclei_outline = geom.outline_raw || [];
+  }
+
+  // Per-label outlines cache (for selected-only mode)
+  const perLabelNuclei = geom.per_label_nuclei || {};
+  const perLabelExpanded = geom.per_label_expanded || {};
+
+  if (result.overlay_type === "gene") {
+    (result.overlays || []).forEach(function (overlay) {
+      (overlay.features || []).forEach(function (feature) {
+        // Restore polygons
+        if (!feature.polygons || !feature.polygons.length) {
+          const polys = (polySource && polySource[feature.label]) || [];
+          feature.polygons = polys;
+        }
+        // Restore per-feature nuclei outlines
+        if (!feature.nuclei_outline_paths || !feature.nuclei_outline_paths.length) {
+          feature.nuclei_outline_paths = perLabelNuclei[feature.label] || [];
+        }
+        // Restore per-feature expanded outlines
+        if (!feature.expanded_outline_paths || !feature.expanded_outline_paths.length) {
+          feature.expanded_outline_paths = perLabelExpanded[feature.label] || [];
+        }
+      });
+    });
+  } else if (result.overlay_type === "observation") {
+    (result.features || []).forEach(function (feature) {
+      // Restore polygons
+      if (!feature.polygons || !feature.polygons.length) {
+        const polys = (polySource && polySource[feature.label]) || [];
+        feature.polygons = polys;
+      }
+      // Restore per-feature nuclei outlines
+      if (!feature.nuclei_outline_paths || !feature.nuclei_outline_paths.length) {
+        feature.nuclei_outline_paths = perLabelNuclei[feature.label] || [];
+      }
+      // Restore per-feature expanded outlines
+      if (!feature.expanded_outline_paths || !feature.expanded_outline_paths.length) {
+        feature.expanded_outline_paths = perLabelExpanded[feature.label] || [];
+      }
+    });
+  }
+  return result;
+};
+
+Bin2CellExplorer.drawOverlayToCanvas = function (payload) {
+  const canvas = Bin2CellExplorer.ensureCanvasOverlay();
+  const ctx = Bin2CellExplorer.state.canvasCtx;
+  const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
+  if (!canvas || !ctx || !viewer) return;
+  if (!viewer.world || !viewer.world.getItemCount()) return;
+  const image = viewer.world.getItemAt(0);
+  if (!image) return;
+
+  const width = viewer.container ? viewer.container.clientWidth : canvas.clientWidth;
+  const height = viewer.container ? viewer.container.clientHeight : canvas.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + "px";
+  canvas.style.height = height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const projectFn = function (pt) {
+    return Bin2CellExplorer.projectPoint(image, viewer, pt);
+  };
+
+  // Draw outlines based on payload flags
+  const showExpandedAll = payload.all_expanded_outline || false;
+  const showExpandedSelected = payload.expanded_outlines_selected || false;
+  const showNucleiAll = payload.all_nuclei_outline || false;
+  const showNucleiSelected = payload.nuclei_outlines_selected || false;
+
+  // Collect label IDs of selected/displayed cells for filtering
+  let selectedLabels = null;
+  if (showExpandedSelected || showNucleiSelected) {
+    selectedLabels = new Set();
+    if (payload.overlay_type === "gene") {
+      (payload.overlays || []).forEach(function (overlay) {
+        if (Bin2CellExplorer.state.hiddenGenes[overlay.gene]) return;
+        (overlay.features || []).forEach(function (feature) {
+          if (feature.label != null) {
+            selectedLabels.add(feature.label);
+          }
+        });
+      });
+    } else if (payload.overlay_type === "observation") {
+      (payload.features || []).forEach(function (feature) {
+        if (Bin2CellExplorer.state.hiddenCategories[feature.category]) return;
+        if (feature.label != null) {
+          selectedLabels.add(feature.label);
+        }
+      });
+    }
+  }
+
+  // Draw expanded outlines (all cells)
+  if (showExpandedAll && payload.expanded_outline && payload.expanded_outline.length) {
+    Bin2CellExplorer.drawLineList(ctx, payload.expanded_outline, {
+      stroke: "rgba(100,100,100,0.9)",  // Darker gray, more opaque - matches selected-only
+      strokeWidth: 1.0
+    }, projectFn);
+  }
+
+  // Draw nuclei outlines (all cells)
+  if (showNucleiAll && payload.nuclei_outline && payload.nuclei_outline.length) {
+    const nucleiColor = payload.nuclei_outline_color || "#000000";
+    const nucleiAlpha = payload.nuclei_outline_alpha != null ? payload.nuclei_outline_alpha : 0.6;
+    const nucleiStroke = Bin2CellExplorer.hexToRgba(nucleiColor, nucleiAlpha);
+    Bin2CellExplorer.drawLineList(ctx, payload.nuclei_outline, {
+      stroke: nucleiStroke,
+      strokeWidth: 0.8
+    }, projectFn);
+  }
+
+  // Get overlay_alpha from payload
+  const overlayAlpha = payload.overlay_alpha != null ? payload.overlay_alpha : 0.7;
+  const renderMode = payload.render_mode || "fill";
+  const highlightColor = payload.highlight_color || "#39ff14";
+  const highlightWidth = payload.highlight_width || 2.0;
+
+  if (payload.overlay_type === "gene") {
+    (payload.overlays || []).forEach(function (overlay) {
+      if (Bin2CellExplorer.state.hiddenGenes[overlay.gene]) return;
+      (overlay.features || []).forEach(function (feature) {
+        if (!feature.polygons || !feature.polygons.length) return;
+
+        let fillColor = null;
+        let strokeColor = null;
+        let strokeWidth = 1.0;
+
+        if (renderMode === "fill") {
+          // Fill mode: show colored fills with subtle borders
+          if (feature.fill) {
+            fillColor = Bin2CellExplorer.applyAlpha(feature.fill, overlayAlpha);
+          }
+        } else if (renderMode === "outline") {
+          // Outline mode: no fill, use highlight color for stroke
+          fillColor = null;
+          strokeColor = Bin2CellExplorer.applyAlpha(highlightColor, overlayAlpha);
+          strokeWidth = highlightWidth;
+        }
+
+        const style = {
+          fill: fillColor,
+          stroke: strokeColor,
+          strokeWidth: strokeWidth
+        };
+        Bin2CellExplorer.drawPolygonList(ctx, feature.polygons, style, projectFn);
+
+        // Draw per-feature outlines if selected-only mode is enabled
+        if (showExpandedSelected && feature.expanded_outline_paths) {
+          Bin2CellExplorer.drawLineList(ctx, feature.expanded_outline_paths, {
+            stroke: "rgba(100,100,100,0.9)",  // Darker gray, more opaque
+            strokeWidth: 1.0
+          }, projectFn);
+        }
+
+        if (showNucleiSelected && feature.nuclei_outline_paths) {
+          const nucleiColor = payload.nuclei_outline_color || "#000000";
+          const nucleiAlpha = payload.nuclei_outline_alpha != null ? payload.nuclei_outline_alpha : 0.6;
+          const nucleiStroke = Bin2CellExplorer.hexToRgba(nucleiColor, nucleiAlpha);
+          Bin2CellExplorer.drawLineList(ctx, feature.nuclei_outline_paths, {
+            stroke: nucleiStroke,
+            strokeWidth: 0.8
+          }, projectFn);
+        }
+      });
+    });
+  } else if (payload.overlay_type === "observation") {
+    (payload.features || []).forEach(function (feature) {
+      if (Bin2CellExplorer.state.hiddenCategories[feature.category]) return;
+      if (!feature.polygons || !feature.polygons.length) return;
+
+      let fillColor = null;
+      let strokeColor = null;
+      let strokeWidth = 1.0;
+
+      if (renderMode === "fill") {
+        // Fill mode: show colored fills
+        if (feature.fill) {
+          fillColor = Bin2CellExplorer.applyAlpha(feature.fill, overlayAlpha);
+        }
+      } else if (renderMode === "outline") {
+        // Outline mode: no fill, use highlight color for stroke
+        fillColor = null;
+        strokeColor = Bin2CellExplorer.applyAlpha(highlightColor, overlayAlpha);
+        strokeWidth = highlightWidth;
+      }
+
+      const style = {
+        fill: fillColor,
+        stroke: strokeColor,
+        strokeWidth: strokeWidth
+      };
+      Bin2CellExplorer.drawPolygonList(ctx, feature.polygons, style, projectFn);
+
+      // Draw per-feature outlines if selected-only mode is enabled
+      if (showExpandedSelected && feature.expanded_outline_paths) {
+        Bin2CellExplorer.drawLineList(ctx, feature.expanded_outline_paths, {
+          stroke: "rgba(100,100,100,0.9)",  // Darker gray, more opaque
+          strokeWidth: 1.0
+        }, projectFn);
+      }
+
+      if (showNucleiSelected && feature.nuclei_outline_paths) {
+        const nucleiColor = payload.nuclei_outline_color || "#000000";
+        const nucleiAlpha = payload.nuclei_outline_alpha != null ? payload.nuclei_outline_alpha : 0.6;
+        const nucleiStroke = Bin2CellExplorer.hexToRgba(nucleiColor, nucleiAlpha);
+        Bin2CellExplorer.drawLineList(ctx, feature.nuclei_outline_paths, {
+          stroke: nucleiStroke,
+          strokeWidth: 0.8
+        }, projectFn);
+      }
+    });
+  }
+};
+
+Bin2CellExplorer.renderOverlay = function (data) {
+  const resolved = Bin2CellExplorer.inflateGeometry(data);
+  Bin2CellExplorer.state.overlays = resolved;
+  Bin2CellExplorer.state.renderPayload = resolved;
+  Bin2CellExplorer.state.lastOverlayPayload = resolved;
+  Bin2CellExplorer.drawOverlayToCanvas(resolved);
+  Bin2CellExplorer.renderLegend(resolved);
   Bin2CellExplorer.renderTileOverview();
   Bin2CellExplorer.ensureViewerHooks();
 };
 
-Bin2CellExplorer.ensureSvgLayer = function() {
-  const op = tmapp["object_prefix"];
-  const base = overlayUtils._d3nodes[op + "_svgnode"];
-  if (!base) {
-    interfaceUtils.alert("Viewer not ready yet.");
-    return null;
-  }
-  if (!Bin2CellExplorer.state.d3layer) {
-    Bin2CellExplorer.state.d3layer = base.append("g").attr("id", op + "_bin2cell_layer");
-  }
-  return Bin2CellExplorer.state.d3layer;
-};
 
-
-Bin2CellExplorer.drawGeneOverlay = function(layer, overlay) {
-  const gene = overlay.gene;
-  const group = layer.append("g").attr("class", "bin2cell-gene-layer").attr("data-gene", gene);
-  const renderMode = overlay.render_mode || "fill";
-
-  (overlay.features || []).forEach(function(feature) {
-    const d = Bin2CellExplorer.polygonsToPath(feature.polygons || []);
-    if (!d) return;
-    const path = group.append("path")
-      .attr("class", "bin2cell-gene-feature")
-      .attr("d", d)
-      .attr("stroke", feature.stroke || "none")
-      .attr("stroke-width", feature.stroke_width || 1.0)
-      .attr("fill", renderMode === "fill" ? (feature.fill || "none") : "none")
-      .attr("vector-effect", "non-scaling-stroke")
-      .attr("data-label", feature.label)
-      .attr("data-value", feature.value);
-  });
-
-  Bin2CellExplorer.state.layers.gene[gene] = group;
-};
-
-Bin2CellExplorer.drawObservationOverlay = function(layer, data) {
-  const renderMode = data.render_mode || "fill";
-  const features = data.features || [];
-  const categoryGroups = {};
-
-  features.forEach(function(feature) {
-    const category = feature.category || "__uncategorized__";
-    if (!categoryGroups[category]) {
-      categoryGroups[category] = layer.append("g")
-        .attr("class", "bin2cell-category-layer")
-        .attr("data-category", category);
-    }
-    const d = Bin2CellExplorer.polygonsToPath(feature.polygons || []);
-    if (!d) return;
-    categoryGroups[category].append("path")
-      .attr("d", d)
-      .attr("stroke", feature.stroke || "none")
-      .attr("stroke-width", feature.stroke_width || 1.0)
-      .attr("fill", renderMode === "fill" ? (feature.fill || "none") : "none")
-      .attr("vector-effect", "non-scaling-stroke")
-      .attr("data-label", feature.label);
-  });
-
-  Bin2CellExplorer.state.layers.categories = categoryGroups;
-};
-
-Bin2CellExplorer.drawOutlines = function(layer, data) {
-  const outlinesGroup = layer.append("g").attr("class", "bin2cell-outline-layer");
-
-  (data.expanded_outline || []).forEach(function(line) {
-    const pathData = Bin2CellExplorer.lineToPath(line);
-    if (!pathData) return;
-    outlinesGroup.append("path")
-      .attr("d", pathData)
-      .attr("stroke", "rgba(180,180,180,0.7)")
-      .attr("stroke-width", 1.0)
-      .attr("fill", "none")
-      .attr("vector-effect", "non-scaling-stroke")
-      .attr("data-kind", "expanded");
-  });
-
-  (data.nuclei_outline || []).forEach(function(line) {
-    const pathData = Bin2CellExplorer.lineToPath(line);
-    if (!pathData) return;
-    // Use UI-configured stroke color and alpha; fall back to defaults if missing
-    const nucleiColor = Bin2CellExplorer.get("nuclei_outline_color") || "#000000";
-    const nucleiAlpha = (function () {
-      const raw = Bin2CellExplorer.get("nuclei_outline_alpha");
-      const num = Number(raw);
-      return isNaN(num) ? 0.6 : Math.max(0, Math.min(1, num));
-    })();
-    const nucleiStroke = Bin2CellExplorer.hexToRgba(nucleiColor, nucleiAlpha);
-    outlinesGroup.append("path")
-      .attr("d", pathData)
-      .attr("stroke", nucleiStroke)
-      .attr("stroke-width", 0.8)
-      .attr("fill", "none")
-      .attr("vector-effect", "non-scaling-stroke")
-      .attr("data-kind", "nuclei");
-  });
-
-  Bin2CellExplorer.state.layers.outlines.group = outlinesGroup;
-};
-
-
-Bin2CellExplorer.imageToViewport = function(x, y, tiledImage) {
+Bin2CellExplorer.imageToViewport = function (x, y, tiledImage) {
   const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
   if (!viewer) return { x: x, y: y };
   const image = tiledImage || viewer.world.getItemAt(0);
@@ -1133,16 +1654,16 @@ Bin2CellExplorer.imageToViewport = function(x, y, tiledImage) {
   return point;
 };
 
-Bin2CellExplorer.polygonsToPath = function(polygons) {
+Bin2CellExplorer.polygonsToPath = function (polygons) {
   if (!polygons || !polygons.length) return "";
   const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
   if (!viewer || !viewer.world.getItemCount()) return "";
   const image = viewer.world.getItemAt(0);
   const segments = [];
-  polygons.forEach(function(poly) {
+  polygons.forEach(function (poly) {
     if (!poly || poly.length < 3) return;
     let path = "";
-    poly.forEach(function(pt, idx) {
+    poly.forEach(function (pt, idx) {
       const vp = Bin2CellExplorer.imageToViewport(pt[0], pt[1], image);
       path += (idx === 0 ? "M" : "L") + vp.x + " " + vp.y;
     });
@@ -1152,20 +1673,20 @@ Bin2CellExplorer.polygonsToPath = function(polygons) {
   return segments.join(" ");
 };
 
-Bin2CellExplorer.lineToPath = function(points) {
+Bin2CellExplorer.lineToPath = function (points) {
   if (!points || !points.length) return "";
   const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
   if (!viewer || !viewer.world.getItemCount()) return "";
   const image = viewer.world.getItemAt(0);
   let path = "";
-  points.forEach(function(pt, idx) {
+  points.forEach(function (pt, idx) {
     const vp = Bin2CellExplorer.imageToViewport(pt[0], pt[1], image);
     path += (idx === 0 ? "M" : "L") + vp.x + " " + vp.y;
   });
   return path;
 };
 
-Bin2CellExplorer.renderLegend = function(data) {
+Bin2CellExplorer.renderLegend = function (data) {
   const legend = document.getElementById("Bin2CellExplorer_legend");
   if (!legend) return;
   legend.innerHTML = "";
@@ -1177,7 +1698,7 @@ Bin2CellExplorer.renderLegend = function(data) {
   }
 };
 
-Bin2CellExplorer.buildGeneLegend = function(container, overlays) {
+Bin2CellExplorer.buildGeneLegend = function (container, overlays) {
   if (!overlays.length) {
     container.textContent = "No genes in overlay.";
     return;
@@ -1187,7 +1708,7 @@ Bin2CellExplorer.buildGeneLegend = function(container, overlays) {
   title.className = "fw-bold mb-1";
   container.appendChild(title);
 
-  overlays.forEach(function(overlay) {
+  overlays.forEach(function (overlay) {
     const gene = overlay.gene;
     const legend = overlay.legend || {};
 
@@ -1198,7 +1719,7 @@ Bin2CellExplorer.buildGeneLegend = function(container, overlays) {
     checkbox.type = "checkbox";
     checkbox.checked = true;
     checkbox.dataset.gene = gene;
-    checkbox.addEventListener("change", function(evt) {
+    checkbox.addEventListener("change", function (evt) {
       Bin2CellExplorer.toggleGeneLayer(gene, evt.target.checked);
     });
 
@@ -1216,7 +1737,7 @@ Bin2CellExplorer.buildGeneLegend = function(container, overlays) {
       gradient.style.flex = "1";
       gradient.style.marginLeft = "8px";
       gradient.style.borderRadius = "4px";
-      gradient.style.background = "linear-gradient(to right," + legend.gradient.map(function(stop) {
+      gradient.style.background = "linear-gradient(to right," + legend.gradient.map(function (stop) {
         return stop[1];
       }).join(",") + ")";
       gradient.title = "min: " + legend.min + " max: " + legend.max;
@@ -1237,7 +1758,7 @@ Bin2CellExplorer.buildGeneLegend = function(container, overlays) {
   });
 };
 
-Bin2CellExplorer.buildObservationLegend = function(container, legendData) {
+Bin2CellExplorer.buildObservationLegend = function (container, legendData) {
   const items = legendData.items || [];
   if (!items.length) {
     container.textContent = "No observation categories.";
@@ -1248,7 +1769,7 @@ Bin2CellExplorer.buildObservationLegend = function(container, legendData) {
   title.className = "fw-bold mb-1";
   container.appendChild(title);
 
-  items.forEach(function(item) {
+  items.forEach(function (item) {
     const row = document.createElement("div");
     row.className = "bin2cell-legend-row";
 
@@ -1256,7 +1777,7 @@ Bin2CellExplorer.buildObservationLegend = function(container, legendData) {
     checkbox.type = "checkbox";
     checkbox.checked = true;
     checkbox.dataset.category = item.label;
-    checkbox.addEventListener("change", function(evt) {
+    checkbox.addEventListener("change", function (evt) {
       Bin2CellExplorer.toggleCategoryLayer(item.label, evt.target.checked);
     });
 
@@ -1280,23 +1801,31 @@ Bin2CellExplorer.buildObservationLegend = function(container, legendData) {
   });
 };
 
-Bin2CellExplorer.toggleGeneLayer = function(gene, visible) {
-  const group = Bin2CellExplorer.state.layers.gene[gene];
-  if (!group) return;
-  group.style("display", visible ? null : "none");
+Bin2CellExplorer.toggleGeneLayer = function (gene, visible) {
+  if (!gene) return;
+  if (visible) {
+    delete Bin2CellExplorer.state.hiddenGenes[gene];
+  } else {
+    Bin2CellExplorer.state.hiddenGenes[gene] = true;
+  }
+  Bin2CellExplorer.scheduleOverlayRefresh();
 };
 
-Bin2CellExplorer.toggleCategoryLayer = function(category, visible) {
-  const group = Bin2CellExplorer.state.layers.categories[category];
-  if (!group) return;
-  group.style("display", visible ? null : "none");
+Bin2CellExplorer.toggleCategoryLayer = function (category, visible) {
+  if (!category) return;
+  if (visible) {
+    delete Bin2CellExplorer.state.hiddenCategories[category];
+  } else {
+    Bin2CellExplorer.state.hiddenCategories[category] = true;
+  }
+  Bin2CellExplorer.scheduleOverlayRefresh();
 };
 
-Bin2CellExplorer.ensureViewerHooks = function() {
+Bin2CellExplorer.ensureViewerHooks = function () {
   if (Bin2CellExplorer.state.viewerHooksInstalled) return;
   const viewer = tmapp[tmapp["object_prefix"] + "_viewer"];
   if (!viewer) return;
-  const schedule = function() {
+  const schedule = function () {
     Bin2CellExplorer.scheduleOverlayRefresh();
   };
   viewer.addHandler("animation", schedule);
@@ -1306,25 +1835,47 @@ Bin2CellExplorer.ensureViewerHooks = function() {
   Bin2CellExplorer.state.viewerHooksInstalled = true;
 };
 
-Bin2CellExplorer.scheduleOverlayRefresh = function() {
-  if (!Bin2CellExplorer.state.lastOverlayPayload) return;
+Bin2CellExplorer.scheduleOverlayRefresh = function () {
+  if (!Bin2CellExplorer.state.renderPayload) return;
   if (Bin2CellExplorer.state.overlayRefreshToken) {
     cancelAnimationFrame(Bin2CellExplorer.state.overlayRefreshToken);
   }
-  Bin2CellExplorer.state.overlayRefreshToken = requestAnimationFrame(function() {
+  Bin2CellExplorer.state.overlayRefreshToken = requestAnimationFrame(function () {
     Bin2CellExplorer.state.overlayRefreshToken = null;
     Bin2CellExplorer.rebuildOverlayGeometry();
   });
 };
 
-Bin2CellExplorer.rebuildOverlayGeometry = function() {
-  const payload = Bin2CellExplorer.state.lastOverlayPayload;
+Bin2CellExplorer.rebuildOverlayGeometry = function () {
+  const payload = Bin2CellExplorer.state.renderPayload || Bin2CellExplorer.state.lastOverlayPayload;
   if (!payload) return;
-  Bin2CellExplorer.renderOverlay(payload);
+  Bin2CellExplorer.drawOverlayToCanvas(payload);
+};
+
+// Helper to apply alpha to any color (hex or rgba)
+Bin2CellExplorer.applyAlpha = function (color, alpha) {
+  if (!color) return null;
+
+  // If it's already rgba, replace the alpha
+  if (color.startsWith('rgba(')) {
+    return color.replace(/,\s*[\d.]+\)$/, `, ${alpha})`);
+  }
+
+  // If it's rgb, convert to rgba
+  if (color.startsWith('rgb(')) {
+    return color.replace(')', `, ${alpha})`).replace('rgb', 'rgba');
+  }
+
+  // If it's hex, convert to rgba
+  if (color.startsWith('#')) {
+    return Bin2CellExplorer.hexToRgba(color, alpha);
+  }
+
+  return color;
 };
 
 // Helper to convert #RRGGBB to rgba(r,g,b,a)
-Bin2CellExplorer.hexToRgba = function(hex, alpha) {
+Bin2CellExplorer.hexToRgba = function (hex, alpha) {
   try {
     const h = String(hex || "").trim();
     let r = 160, g = 160, b = 160;
@@ -1337,7 +1888,7 @@ Bin2CellExplorer.hexToRgba = function(hex, alpha) {
     const a = Math.max(0, Math.min(1, Number(alpha)));
     return `rgba(${r},${g},${b},${a})`;
   } catch (e) {
-    return `rgba(160,160,160,${Math.max(0, Math.min(1, Number(alpha)||0.5))})`;
+    return `rgba(160,160,160,${Math.max(0, Math.min(1, Number(alpha) || 0.5))})`;
   }
 };
 // Ensure filename-based global exists for TissUUmaps plugin loader, cause we changed name
